@@ -1,34 +1,423 @@
-# Practical Machine Learning Course Project
+# Predicting Barbell Lifts Performance from Accelerometers Data
 Ph A  
 19 septembre 2016  
 
 
 
-## R Markdown
+**WARNING** : we submitted here (following up on the mentor post) the gh-page (https://palcouffe.github.io/practicalmachinelearning/) but the full repository (with .Rmd, .md and .html) can be found at https://github.com/palcouffe/practicalmachinelearning.
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+# Synopsis
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+The goal of this project is to use data collected from accelerometers placed on the belt, forearm, arm and dumbell of 6 participants performing barbell lifts to predict how well they did the exercices. The participants were asked to perform the lifts in a correct way and in 4 incorrect ways.
+In a first step, we loaded, explored and preprocessed the data. We then used a Random Forest Classification Algorithm (and justified our choice) to build and train a model. Using cross-validation, we computed the accuracy of that model and the expected out of sample error. Finally, our prediction model was applied to 20 different test cases.
+
+# Loading and Preprocessing Data
+## Software environment used
 
 
 ```r
-summary(cars)
+library(caret)                          # obviously ...
+library(caretEnsemble)                  # to easily extract metrics like accuracy from any caret model
+library(parallel)                       # for parallel processing
+library(doParallel)                     # for parallel processing
+library(formattable)                    # for the percent formatting function
+```
+
+## Downloading and Preliminary Exploration
+
+### Downloading and Reading the Data
+
+
+```r
+if (!file.exists("DATA")) {dir.create("DATA")}                                             # create dir for data
+fileUrlTraining <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"  # training data url
+download.file(fileUrlTraining,destfile="./DATA/pml-training.csv", method="curl")           # download the file
+
+fileUrlTesting <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"    # testing data url
+download.file(fileUrlTesting,destfile="./DATA/pml-testing.csv", method="curl")             # download the file   
+
+rawTrainingData <- read.csv("./DATA/pml-training.csv")                                     # read training data
+rawTestingData <- read.csv("./DATA/pml-testing.csv")                                       # read testing data 
+```
+
+### Preliminary Exploration of the Raw Data
+
+
+```r
+dim(rawTrainingData)                                  # a very preliminary look up
 ```
 
 ```
-##      speed           dist       
-##  Min.   : 4.0   Min.   :  2.00  
-##  1st Qu.:12.0   1st Qu.: 26.00  
-##  Median :15.0   Median : 36.00  
-##  Mean   :15.4   Mean   : 42.98  
-##  3rd Qu.:19.0   3rd Qu.: 56.00  
-##  Max.   :25.0   Max.   :120.00
+## [1] 19622   160
 ```
 
-## Including Plots
+We have 160 variables and 19622 observations. Let's explore the first 15 variables to see if we can refine our reading of the data.
 
-You can also embed plots, for example:
 
-![](index_files/figure-html/pressure-1.png)<!-- -->
+```r
+str(rawTrainingData[,c(1:15)], vec.len=2)            # look up 15 first variables
+```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```
+## 'data.frame':	19622 obs. of  15 variables:
+##  $ X                   : int  1 2 3 4 5 ...
+##  $ user_name           : Factor w/ 6 levels "adelmo","carlitos",..: 2 2 2 2 2 ...
+##  $ raw_timestamp_part_1: int  1323084231 1323084231 1323084231 1323084232 1323084232 ...
+##  $ raw_timestamp_part_2: int  788290 808298 820366 120339 196328 ...
+##  $ cvtd_timestamp      : Factor w/ 20 levels "02/12/2011 13:32",..: 9 9 9 9 9 ...
+##  $ new_window          : Factor w/ 2 levels "no","yes": 1 1 1 1 1 ...
+##  $ num_window          : int  11 11 11 12 12 ...
+##  $ roll_belt           : num  1.41 1.41 1.42 1.48 1.48 ...
+##  $ pitch_belt          : num  8.07 8.07 8.07 8.05 8.07 ...
+##  $ yaw_belt            : num  -94.4 -94.4 -94.4 -94.4 -94.4 ...
+##  $ total_accel_belt    : int  3 3 3 3 3 ...
+##  $ kurtosis_roll_belt  : Factor w/ 397 levels "","-0.016850",..: 1 1 1 1 1 ...
+##  $ kurtosis_picth_belt : Factor w/ 317 levels "","-0.021887",..: 1 1 1 1 1 ...
+##  $ kurtosis_yaw_belt   : Factor w/ 2 levels "","#DIV/0!": 1 1 1 1 1 ...
+##  $ skewness_roll_belt  : Factor w/ 395 levels "","-0.003095",..: 1 1 1 1 1 ...
+```
+
+It appears clearly that :
+
+*   **the first 7 rows** do not correspond to measurements and data captured but qualify the participants (e.g. `user_name`) or are descriptives about when the measurements was done (e.g. `raw_timestamp_part_1` or `num_window`). We will therefore not keep those variables as predictors
+*   **"" and "#DIV/0!"** should be imported as NAs. We will therefore reimport our data specifying these to be translated into NAs.
+
+## Preprocessing and Predictors picking
+
+### Preliminary cleaning
+Following up on our preliminary exploration, we can now reload the data excluding the first 7 variables and importing  "" and "#DIV/0!" as NAs.
+
+
+```r
+trainingData <- read.csv("./DATA/pml-training.csv", 
+                         na.strings=c("NA","","#DIV/0!"))[,-c(1:7)]      # read training data
+testingData <- read.csv("./DATA/pml-testing.csv",
+                        na.strings=c("NA","","#DIV/0!"))[,-c(1:7)]       # read testing data 
+```
+
+We now should no longer have any character variables and only one factor variable.
+
+
+```r
+str(Filter(is.factor,trainingData), vec.len=2)                           # filtering to get the factors left
+```
+
+```
+## 'data.frame':	19622 obs. of  1 variable:
+##  $ classe: Factor w/ 5 levels "A","B","C","D",..: 1 1 1 1 1 ...
+```
+
+```r
+typeVar <- unique(sapply(trainingData,typeof))                           # listing type of variables in data
+typeVar
+```
+
+```
+## [1] "double"  "integer" "logical"
+```
+
+We indeed have now only variables of type double, integer, logical and the factor variable `classe` with 5 levels. This is indeed the variable we will need to predict and it takes 5 values (cf documentation @velloso01 [[LINK]](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201)) each of which indicates how well the lift was performed :
+
+*    A : exactly according to the specification
+*    B : throwing the elbows to the front
+*    C : lifting the dumbbell only halfway
+*    D : lowering the dumbbell only halfway
+*    E : throwing the hips to the front
+
+### Dealing with NA's
+
+We will now explore if we should impute values for those NAs or just not pick up the variables with a too important percentage of NAs. To take our decision, we computed a table showing the number of variables vs. percentage of NAs they include.
+
+
+```r
+pctgNAtraining <- colSums(is.na(trainingData)) / nrow(trainingData)     # computing pctg NAs for training data
+tbl <- table(percent(pctgNAtraining,0))                                 # display number of var vs pctg NAs
+knitr::kable(data.frame(tbl), 
+             col.names=c("% NAs in Variable", "Number of Variables"))   # pretty print
+```
+
+
+
+% NAs in Variable    Number of Variables
+------------------  --------------------
+0%                                    53
+98%                                   94
+100%                                   6
+
+It appears that the minumum percentage of NAs is 97.93%. We can therefore safely exclude from our predictors any variable that has NAs. We will eliminate those variables from the training data set and eliminate the same variables from the test set.
+
+
+```r
+trainingData <- trainingData[,pctgNAtraining ==0]                       # keeping only variables with no NAs
+testingData <- testingData[,pctgNAtraining ==0]                         # keeping same variables in testing
+```
+
+###Identifying Zero- and Near Zero-Variance Predictors
+
+Let's examine if we have any variables displaying near zero-variance that would need not to be picked up.
+
+
+```r
+nzvTraining <- nearZeroVar(trainingData, saveMetrics=TRUE)               # computing nzv for variables
+nrow(nzvTraining[nzvTraining$nzv==TRUE,])                                # displaying # variables with nzv
+```
+
+```
+## [1] 0
+```
+
+It appears that we have 0 variable with zero or near-zero variance in the data set once variables with NAs have been eliminated.
+
+###Identifying Highly Correlated Predictors
+To identify Predictors that are highly correlated, let's build a correlation matrix and find the variables with a correlation above `0.95`. We will operate on the training data without the `classe` variable (the last variable).
+
+
+```r
+corTraining <- cor(trainingData[,-ncol(trainingData)])
+highlyCorrelatedTraining <- findCorrelation(corTraining, cutoff = 0.95)
+names(trainingData)[highlyCorrelatedTraining]
+```
+
+```
+## [1] "accel_belt_z"     "roll_belt"        "accel_belt_x"    
+## [4] "gyros_dumbbell_z"
+```
+We found 4 variables (accel_belt_z, roll_belt, accel_belt_x, gyros_dumbbell_z) that are highly correlated. However, we decided at this stage not to remove those from our predictors. The reason is that we decided to choose a Random Forest Algorithm and this algorithm is reputed to nicely handle highly correlated predictors (cf Background section in  @strobl01 [[LINK]](http://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-9-307)))
+
+> "Random forests are becoming increasingly popular in many scientific fields because they can cope with "small n large p" problems, complex interactions and even highly correlated predictor variables."
+
+## Final Set of Predictors selected
+
+```r
+dim(trainingData[,-ncol(trainingData)])
+```
+
+```
+## [1] 19622    52
+```
+
+To summarize, our final set of predictors will include 52 variables from the original data set and 19622 observations.
+
+# Partitionning into Training, Validation and Testing Sets
+We already have a testing set but this does not include the actual `classe` value so it can't be used to compute an out of sample error.
+We will therefore split our training set into 2 sets, a **set to train our model** and a **validation set** that will be used to compute Predicted Accuracy and Out of Sample Error (using cross validation on the validation set).
+
+
+```r
+set.seed(95104)
+inTrain=createDataPartition(trainingData$classe,p=3/4)[[1]]
+myTrainingData = trainingData[inTrain,]
+myValidationData = trainingData[-inTrain,]
+```
+
+# Training a Random Forest Model with Parallel Processing
+
+The variable to predict is `classe`, a factor of 5 values. We are in a Classification problem for which a Random Forest Algorithm is particularly well adapted. There are many advantages to this algorithm including the ability to deal with hightly correlated predictors that make us think it was well suited for our study case. We would like to quote here from :
+
+*   @walker01 [[LINK]](http://www.datasciencecentral.com/profiles/blogs/random-forests-algorithm) : 
+
+        *    Accuracy
+        *    Runs efficiently on large data bases
+        *    Handles thousands of input variables without variable deletion
+        *    Provides effective methods for estimating missing data
+        *    Maintains accuracy when a large proportion of the data are missing
+*   @cutler01 [[LINK]](http://www.math.usu.edu/adele/RandomForests/UofU2013.pdf) : 
+
+        *    Quick to fit, even for large problems
+        *    No formal distributional assumptions
+        *    Automatically fits hightly non-linear interactions
+        *    Automatic variable selection
+
+We will train our model using a K-fold (with 10 folds) cross validation as enabled by the caret package and for performance speed up will use a parallel processing, following the steps kindly described by our mentor Leonard Greski in @greski01 [[LINK]](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md).
+
+
+```r
+cluster <- makeCluster(detectCores() - 1)               # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+
+
+```r
+set.seed(95104)
+
+x <- myTrainingData[,-53]                               # set the predictors
+y <- myTrainingData[,53]                                # set the variable to predict
+
+fitControl <- trainControl(method = "cv",               # set cross validation
+                           number = 10,                 # to be a 10 folds
+                           allowParallel = TRUE)        # using parallelization
+
+modFit <- train(x,y,method="rf",                        # fit model on training data
+                 data=myTrainingData,
+                 trControl= fitControl)
+
+stopCluster(cluster)
+```
+
+Let's display the characteristics of the trained model (the best random forest will be picked up as the final model) :
+
+```r
+modFit
+```
+
+```
+## Random Forest 
+## 
+## 14718 samples
+##    52 predictor
+##     5 classes: 'A', 'B', 'C', 'D', 'E' 
+## 
+## No pre-processing
+## Resampling: Cross-Validated (10 fold) 
+## Summary of sample sizes: 13245, 13246, 13244, 13247, 13245, 13249, ... 
+## Resampling results across tuning parameters:
+## 
+##   mtry  Accuracy   Kappa    
+##    2    0.9932739  0.9914907
+##   27    0.9915073  0.9892557
+##   52    0.9846452  0.9805732
+## 
+## Accuracy was used to select the optimal model using  the largest value.
+## The final value used for the model was mtry = 2.
+```
+
+We observe a model accuracy of **99.33%** which is very good. 
+
+# Cross Validation
+We can now use the validation set we put aside to predict on and estimate the Expected Predictive Accuracy and Out of Sample Error.
+
+## Predicting on Validation Data
+
+```r
+predictMod <- predict(modFit, newdata=myValidationData)         # apply model on validation data
+```
+
+## Accuracy of the Model and Expected Out of Sample error
+Let's build our confusion matrix to compute the Expected Predictive Accuracy and deduce the Out of Sample Error (1 - accuracy).
+
+```r
+confusionMatrix(predictMod,myValidationData$classe)             # build confusion matrix
+```
+
+```
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 1395    2    0    0    0
+##          B    0  944   12    0    0
+##          C    0    3  841   15    0
+##          D    0    0    2  788    2
+##          E    0    0    0    1  899
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.9925          
+##                  95% CI : (0.9896, 0.9947)
+##     No Information Rate : 0.2845          
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.9905          
+##  Mcnemar's Test P-Value : NA              
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   0.9947   0.9836   0.9801   0.9978
+## Specificity            0.9994   0.9970   0.9956   0.9990   0.9998
+## Pos Pred Value         0.9986   0.9874   0.9790   0.9949   0.9989
+## Neg Pred Value         1.0000   0.9987   0.9965   0.9961   0.9995
+## Prevalence             0.2845   0.1935   0.1743   0.1639   0.1837
+## Detection Rate         0.2845   0.1925   0.1715   0.1607   0.1833
+## Detection Prevalence   0.2849   0.1949   0.1752   0.1615   0.1835
+## Balanced Accuracy      0.9997   0.9958   0.9896   0.9896   0.9988
+```
+
+```r
+rfAccuracy <- confusionMatrix(predictMod,myValidationData$classe)$overall['Accuracy']
+rfAccuracy
+```
+
+```
+##  Accuracy 
+## 0.9924551
+```
+
+Accuracy is **99.25%** and Expected Out of Sample error **0.75%**.
+ 
+## Variable Importance
+As a complement, we display here the top 10 variables by importance in the Random Forest Algorithm showing the contribution of these variables to the model.
+
+```r
+varImpPlot(modFit$finalModel, n.var=10, main="Top 10 Variable Importance")      # plot variable importance
+```
+
+![](FIGURES/display_varimp-1.png)<!-- -->
+
+# Predicting on Testing Set
+Finally, we can now use our testing set to predict on (and feed in the quizz).
+
+```r
+finalpredict <- predict(modFit, newdata=testingData)                            # apply model on test data
+tbl <- data.frame(matrix(finalpredict,ncol=20,byrow=TRUE))
+knitr::kable(data.frame(tbl),                                                   # pretty print predictions
+             col.names=c(1:20)) 
+```
+
+
+
+1    2    3    4    5    6    7    8    9    10   11   12   13   14   15   16   17   18   19   20 
+---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---
+B    A    B    A    A    E    D    B    A    A    B    C    B    A    E    E    A    B    B    B  
+
+The quizz resulted in a 20/20 ! Yeah !!! 
+
+# References
+
+<style type="text/css">
+
+h1 { /* Header 1 */
+ font-size: 28px;
+}
+h2 { /* Header 2 */
+ font-size: 22px;
+}
+h3 { /* Header 3 */
+ font-size: 18px;
+}
+
+table {
+   padding: 0;border-collapse: collapse; }
+table tr {
+   border-top: 1px solid #cccccc;
+   background-color: white;
+   margin: 0;
+   padding: 0; }
+table tr:nth-child(2n) {
+   background-color: #dfdfdf; }
+table tr th {
+   background-color: #c6c6c6;
+   font-weight: bold;
+   text-align:center;
+   border: 1px solid #cccccc;
+   margin: 0;
+   padding: 6px 13px; }
+table tr td {
+   border: 1px solid #cccccc;
+   margin: 0;
+   text-align:center;
+   padding: 6px 13px;}
+   
+table tr th :first-child, table tr td :first-child {
+   margin-top: 0; }
+table tr th :last-child, table tr td :last-child {
+   margin-bottom: 0; }
+
+blockquote p {
+  font-size: 14px;
+  font-style: italic;
+}
+
+</style>
+
+
